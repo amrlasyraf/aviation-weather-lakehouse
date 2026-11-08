@@ -1,6 +1,6 @@
 # Databricks Notebook: 04_gold_to_neon
 # Description: Syncs aggregated Gold metrics to Neon Serverless Postgres via Neon HTTP SQL proxy.
-# Pure Python using `requests` (no external C drivers/psycopg2 required).
+# Pure Python using `requests` (no external C drivers required).
 
 import os
 import urllib.parse
@@ -12,14 +12,26 @@ spark.sql("USE CATALOG workspace")
 spark.sql("USE SCHEMA default")
 
 def get_neon_connection_string():
+    # 1. Global dbutils in notebook namespace
     try:
-        import dbutils # type: ignore
-        return dbutils.secrets.get(scope="aviation_scope", key="neon_db_url")
+        return dbutils.secrets.get(scope="aviation_scope", key="neon_db_url") # type: ignore
+    except (NameError, AttributeError):
+        pass
+
+    # 2. PySpark DBUtils fallback
+    try:
+        from pyspark.dbutils import DBUtils
+        d = DBUtils(spark)
+        return d.secrets.get(scope="aviation_scope", key="neon_db_url")
     except Exception:
-        url = os.environ.get("NEON_DATABASE_URL")
-        if not url:
-            raise ValueError("NEON_DATABASE_URL is not set in environment or Databricks secrets.")
+        pass
+
+    # 3. Environment variable fallback
+    url = os.environ.get("NEON_DATABASE_URL")
+    if url:
         return url
+
+    raise ValueError("Could not retrieve neon_db_url from dbutils.secrets or NEON_DATABASE_URL environment variable.")
 
 def sync_gold_to_neon():
     gold_df = spark.read.table("gold_airport_congestion_weather_mart")
