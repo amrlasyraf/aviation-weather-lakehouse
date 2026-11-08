@@ -7,10 +7,10 @@ from psycopg2.extras import execute_values
 from pyspark.sql import SparkSession
 
 spark = SparkSession.builder.getOrCreate()
-GOLD_BASE = "/tmp/lakehouse/gold"
+spark.sql("USE CATALOG workspace")
+spark.sql("USE SCHEMA default")
 
 def get_neon_connection_string():
-    # Attempt Databricks secrets first, then fallback to environment variable
     try:
         import dbutils # type: ignore
         return dbutils.secrets.get(scope="aviation_scope", key="neon_db_url")
@@ -21,7 +21,7 @@ def get_neon_connection_string():
         return url
 
 def sync_gold_to_neon():
-    gold_df = spark.read.format("delta").load(f"{GOLD_BASE}/airport_congestion_weather_mart")
+    gold_df = spark.read.table("gold_airport_congestion_weather_mart")
     records = gold_df.toPandas()
 
     if records.empty:
@@ -55,7 +55,6 @@ def sync_gold_to_neon():
             updated_at = CURRENT_TIMESTAMP;
     """
 
-    # Transform DataFrame to tuples
     data_tuples = [
         (
             row["event_date"],

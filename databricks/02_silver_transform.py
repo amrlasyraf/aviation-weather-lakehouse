@@ -1,6 +1,5 @@
 # Databricks Notebook: 02_silver_transform
-# Description: Cleans, deduplicates, and enriches flight and weather data. 
-# Performs spatial-temporal proximity matching between flights and airports.
+# Description: Cleans, deduplicates, and enriches flight and weather data in Unity Catalog. 
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -10,17 +9,15 @@ from pyspark.sql.functions import (
 from pyspark.sql.window import Window
 
 spark = SparkSession.builder.getOrCreate()
-
-BRONZE_BASE = "/tmp/lakehouse/bronze"
-SILVER_BASE = "/tmp/lakehouse/silver"
+spark.sql("USE CATALOG workspace")
+spark.sql("USE SCHEMA default")
 
 # -------------------------------------------------------------------------
 # 1. Clean & Deduplicate Airport Weather
 # -------------------------------------------------------------------------
 def process_silver_weather():
-    df_raw = spark.read.format("delta").load(f"{BRONZE_BASE}/airport_weather")
+    df_raw = spark.read.table("bronze_airport_weather")
     
-    # Deduplicate latest record per airport & observed time
     window_spec = Window.partitionBy("airport_code", "observed_at").orderBy(col("ingestion_timestamp").desc())
     
     df_clean = df_raw \
@@ -37,7 +34,7 @@ def process_silver_weather():
         .mode("overwrite") \
         .partitionBy("airport_code") \
         .option("overwriteSchema", "true") \
-        .save(f"{SILVER_BASE}/airport_weather")
+        .saveAsTable("silver_airport_weather")
         
     print("Silver weather processing complete.")
     return df_clean
@@ -46,9 +43,8 @@ def process_silver_weather():
 # 2. Clean Flight States & Compute Airport Proximity
 # -------------------------------------------------------------------------
 def process_silver_flights(df_weather_silver):
-    df_flights_raw = spark.read.format("delta").load(f"{BRONZE_BASE}/flight_states")
+    df_flights_raw = spark.read.table("bronze_flight_states")
     
-    # Filter valid coordinates & deduplicate
     window_spec = Window.partitionBy("icao24", "snapshot_time").orderBy(col("ingestion_timestamp").desc())
     
     df_valid_flights = df_flights_raw \
@@ -58,7 +54,6 @@ def process_silver_flights(df_weather_silver):
         .drop("rn") \
         .withColumn("event_date", to_date(col("ingestion_timestamp")))
 
-    # Airports broadcast metadata
     airports_df = df_weather_silver.select(
         col("airport_code"), 
         col("airport_name"), 
@@ -66,12 +61,10 @@ def process_silver_flights(df_weather_silver):
         col("longitude").alias("airport_lon")
     ).distinct()
 
-    # Cross join with airports to find nearby flights (< 120km radius)
     joined = df_valid_flights.crossJoin(airports_df)
 
-    # Haversine Distance in Kilometers
-    # d = 2 * R * asin(sqrt(sin^2(dlat/2) + cos(lat1)*cos(lat2)*sin^2(dlon/2)))
-    R = 6371.0 # Earth radius km
+    # Haversine Distance in km
+    R = 6371.0
     dlat = radians(col("latitude") - col("airport_lat"))
     dlon = radians(col("longitude") - col("airport_lon"))
     lat1 = radians(col("airport_lat"))
@@ -82,9 +75,8 @@ def process_silver_flights(df_weather_silver):
     distance_km = round(lit(R) * c, 2)
 
     df_proximity = joined.withColumn("distance_km", distance_km) \
-        .filter(col("distance_km") <= 120.0) # Flights within 120km terminal airspace
+        .filter(col("distance_km") <= 120.0)
 
-    # Categorize operational flight status
     df_silver_enriched = df_proximity.withColumn("airspace_status", 
         when(col("on_ground") == True, "TAXI_OR_GROUND")
         .when((col("baro_altitude") < 3000) & (col("vertical_rate") < -1.0), "APPROACHING")
@@ -98,7 +90,7 @@ def process_silver_flights(df_weather_silver):
         .mode("overwrite") \
         .partitionBy("airport_code") \
         .option("overwriteSchema", "true") \
-        .save(f"{SILVER_BASE}/flights_near_airports")
+        .saveAsTable("silver_flights_near_airports")
 
     print("Silver flight spatial enrichment complete.")
 
